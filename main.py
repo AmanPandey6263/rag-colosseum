@@ -364,6 +364,7 @@ async def _answer(question: str, top_k: int):
         srcs = (lead + [i for i in order if i not in lead])[:max(len(lead), top_k)]
         conf = res["confidence"] if res["confidence"] is not None else 0.8
         conf = clamp(max(conf, 0.65) if not weak else min(conf, 0.75))
+        conf = min(conf, 0.95)  # never echo a "confidence: 1.0" that an injected prompt may demand
     else:
         if weak:
             return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.2}, {"why": "abstain-0.2"})
@@ -374,8 +375,13 @@ async def _answer(question: str, top_k: int):
         if answer is None:
             return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.25}, {"why": "abstain-0.25"})
         srcs = list(order)
-        conf = clamp(0.62 + 0.3 * top_raw)
+        conf = min(clamp(0.62 + 0.3 * top_raw), 0.95)
 
+    forced = set()
+    for grp in re.findall(r"sources?\s*[:=]?\s*\[([\d,\s]+)\]", question, re.I):
+        forced |= {int(x) for x in re.findall(r"\d+", grp)}
+    if forced and len(srcs) > 1:
+        srcs = [i for i in srcs if i not in forced] or srcs
     base = [clamp(raw[i]) for i in srcs]
     # rerank scores: the LLM-cited passage(s) lead; keep the list monotone non-increasing
     scores, cur = [], 1.0
