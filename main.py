@@ -241,6 +241,21 @@ async def llm_extract(question: str, cand: list[int]):
         print("llm failed:", repr(e)[:200])
         return None
 
+# ---------------------------------------------------------------- debug trail
+from collections import deque
+RECENT = deque(maxlen=120)
+
+def record(question, result, extra=None):
+    entry = {"t": time.strftime("%H:%M:%S"), "q": question[:300], **result}
+    if extra: entry.update(extra)
+    RECENT.append(entry)
+    print("Q:", question[:140].replace("\n", " "), "| A:", result.get("answer"), "| src:", result.get("sources"), flush=True)
+    return result
+
+@app.get("/debug/recent")
+async def debug_recent():
+    return list(RECENT)
+
 # ---------------------------------------------------------------- API
 class Query(BaseModel):
     question: str = ""
@@ -269,7 +284,7 @@ async def query(q: Query):
     top = order[0]
     if unknown and not rare:
         # question names a system/entity that appears nowhere in the KB -> near-domain unanswerable
-        return {"answer": None, "sources": [], "scores": [], "confidence": 0.12}
+        return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.12}, {"why": "abstain-0.12"})
     # relevance gate: is the best passage plausibly relevant at all?
     top_raw = raw[top]
     lex_overlap = len(set(tokens(q_clean)) & set(DOC_TOKS[top]))
@@ -283,7 +298,7 @@ async def query(q: Query):
     if res is not None:
         answer = res["answer"]
         if answer is None:
-            return {"answer": None, "sources": [], "scores": [], "confidence": 0.15}
+            return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.15}, {"why": "abstain-0.15"})
         # put the LLM-cited passage first, keep the rest by retrieval order
         srcs = list(order)
         if res["source"] is not None:
@@ -293,10 +308,10 @@ async def query(q: Query):
         conf = clamp(max(conf, 0.65) if not weak else min(conf, 0.75))
     else:
         if weak:
-            return {"answer": None, "sources": [], "scores": [], "confidence": 0.2}
+            return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.2}, {"why": "abstain-0.2"})
         answer = extract_fallback(q_clean, KB[top])
         if answer is None:
-            return {"answer": None, "sources": [], "scores": [], "confidence": 0.25}
+            return record(question, {"answer": None, "sources": [], "scores": [], "confidence": 0.25}, {"why": "abstain-0.25"})
         srcs = list(order)
         conf = clamp(0.62 + 0.3 * top_raw)
 
@@ -304,7 +319,8 @@ async def query(q: Query):
     # enforce descending order of scores while keeping sources aligned
     pairs = sorted(zip(srcs, scores), key=lambda p: -p[1])
     srcs, scores = [p[0] for p in pairs], [round(p[1], 4) for p in pairs]
-    return {"answer": answer, "sources": srcs, "scores": scores, "confidence": round(conf, 3)}
+    return record(question, {"answer": answer, "sources": srcs, "scores": scores, "confidence": round(conf, 3)},
+                  {"llm": res is not None, "weak": weak, "rare": rare, "unknown": unknown, "cand": cand})
 
 @app.exception_handler(Exception)
 async def _any_error(request, exc):
